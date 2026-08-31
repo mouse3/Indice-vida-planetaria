@@ -1,7 +1,6 @@
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
 import numpy as np
-
+from dataclasses import dataclass
+from typing import Dict, Tuple
 
 # -----------------------------------------------------------------------------
 # 1. CONSTANTES FÍSICAS UNIVERSALES (SI)
@@ -10,12 +9,10 @@ H: float = 6.62607015e-34       # Constante de Planck [J*s]
 C: float = 2.99792458e8         # Velocidad de la luz [m/s]
 K_B: float = 1.380649e-23       # Constante de Boltzmann [J/K]
 EV_TO_J: float = 1.602176634e-19 # Conversión de eV a Joules
-R_GAS: float = 8.314462618      # Constante universal de los gases [J/(mol*K)]
-SIGMA: float = 5.670374419e-8   # Constante de Stefan-Boltzmann [W/(m^2 * K^4)]
 
 
 # -----------------------------------------------------------------------------
-# 2. ESTROCTURAS DE DATOS Y ENLACES QUÍMICOS
+# 2. ESTRUCTURA DE DATOS Y TABLAS DE ENLACES QUÍMICOS
 # -----------------------------------------------------------------------------
 @dataclass
 class ChemicalBond:
@@ -26,7 +23,6 @@ class ChemicalBond:
     lambda_nm: float
 
 
-# Tabla de enlaces CHONPS y Silicio
 BONDS_CHONPS: Dict[str, ChemicalBond] = {
     "OH_alcohol": ChemicalBond("O-H", "Alcoholes/Ácidos", 4.79, 463.0, 258.9),
     "OH_water":   ChemicalBond("O-H", "Agua simple",      4.81, 464.0, 257.8),
@@ -46,7 +42,7 @@ BONDS_SILICON: Dict[str, ChemicalBond] = {
 
 
 # -----------------------------------------------------------------------------
-# 3. RADIACIÓN Y ESPECTRO DE CUERPO NEGRO
+# 3. FUNCIONES AUXILIARES DE RADIACIÓN Y PROBABILIDAD FOTOQUÍMICA
 # -----------------------------------------------------------------------------
 def planck_spectral_radiance(lam_meters: np.ndarray, T_star: float) -> np.ndarray:
     """Calcula la irradiancia espectral B_lambda(lambda, T) en W/(m^2 * sr * m)."""
@@ -59,127 +55,137 @@ def photon_energy_ev(lam_meters: np.ndarray) -> np.ndarray:
     return (H * C / lam_meters) / EV_TO_J
 
 
-def calculate_surface_flux(T_star: float, R_star: float, distance_au: float, 
-                           lam_range: Tuple[float, float]) -> float:
-    """Calcula el flujo de radiación espectral integrado [W/m^2] a una distancia planetaria d."""
-    AU_in_meters = 1.496e11
-    d_meters = distance_au * AU_in_meters
-    
-    lam = np.linspace(lam_range[0], lam_range[1], 1000)
-    b_lam = planck_spectral_radiance(lam, T_star)
-    
-    # Integración trapezoidal del espectro estelar
-    integrated_radiance = np.trapezoid(b_lam, lam) # [W / (m^2 sr)]
-    flux_at_star = np.pi * integrated_radiance # [W / m^2]
-    
-    # Ley de la inversa del cuadrado
-    flux_at_planet = flux_at_star * (R_star / d_meters)**2
-    return flux_at_planet
-
-
-# -----------------------------------------------------------------------------
-# 4. VENTANA FOTOQUÍMICA Y PROBABILIDAD DE ACTIVACIÓN
-# -----------------------------------------------------------------------------
-def single_bond_probability(E_ev: np.ndarray, 
-                            E_b_ev: float, 
-                            E_exc_ev: float = 1.8, 
-                            beta1: float = 10.0, 
-                            beta2: float = 10.0) -> np.ndarray:
-    """Calcula W(E, E_b) para un enlace específico."""
+def single_bond_probability(E_ev: np.ndarray, E_b_ev: float, E_exc_ev: float = 1.8, 
+                            beta1: float = 10.0, beta2: float = 10.0) -> np.ndarray:
+    """Calcula la probabilidad W_i(E, E_b) para un enlace individual."""
     p_activation = 1.0 / (1.0 + np.exp(-beta1 * (E_ev - E_exc_ev)))
     p_survival = 1.0 / (1.0 + np.exp(beta2 * (E_ev - E_b_ev)))
     return p_activation * p_survival
 
 
-def total_photochemical_window(E_ev: np.ndarray, 
-                               bonds: Dict[str, ChemicalBond], 
-                               E_exc_ev: float = 1.8, 
-                               beta1: float = 10.0, 
-                               beta2: float = 10.0) -> np.ndarray:
-    """
-    Calcula la ventana fotoquímica total W_T(E) mediante la unión probabilística:
-    W_T(E) = 1 - PROD_i (1 - W_i(E, E_b_i)) en el intervalo [0, 1].
-    """
+def total_photochemical_window(E_ev: np.ndarray, bonds: Dict[str, ChemicalBond], 
+                               E_exc_ev: float = 1.8, beta1: float = 10.0, beta2: float = 10.0) -> np.ndarray:
+    """Unión probabilística de ventanas individuales: W_T(E) = 1 - PROD(1 - W_i)."""
     prod_term = np.ones_like(E_ev, dtype=float)
     for bond in bonds.values():
         w_i = single_bond_probability(E_ev, bond.energy_ev, E_exc_ev, beta1, beta2)
         prod_term *= (1.0 - w_i)
-    
     return 1.0 - prod_term
 
 
-def photoelectric_kinetic_energy(E_ev: np.ndarray, work_function_ev: float) -> np.ndarray:
-    """Calcula E_c_max = h*nu - W_0 (en eV), limitando valores negativos a 0."""
-    return np.maximum(0.0, E_ev - work_function_ev)
-
-
 # -----------------------------------------------------------------------------
-# 5. TERMODINÁMICA Y ENTROPÍA DEL FLUJO DE FOTONES
-# -----------------------------------------------------------------------------
-def arrhenius_rate_constant(A: float, m: float, E_a_J: float, T_planet: float) -> float:
-    """Calcula la constante cinética de reacción: k = A * T^m * exp(-E_a / (R * T))."""
-    return A * (T_planet**m) * np.exp(-E_a_J / (R_GAS * T_planet))
-
-
-def negentropy_production_rate(E_absorbed_joules: float, 
-                               T_planet: float, 
-                               T_star: float) -> float:
-    """
-    Calcula la tasa de producción de negentropía disponible:
-    Delta S = (4/3) * E * (1 / T_planet - 1 / T_star)  [J / (K * m^2 * s)]
-    """
-    return (4.0 / 3.0) * E_absorbed_joules * ((1.0 / T_planet) - (1.0 / T_star))
-
-
-# -----------------------------------------------------------------------------
-# 6. SIMULACIÓN INTEGRAL DEL MODELO
+# 4. CLASE PRINCIPAL DEL MODELO DE HABITABILIDAD ASTROBIOLÓGICA
 # -----------------------------------------------------------------------------
 class AstrobiologicalHabitabilityModel:
-    def __init__(self, T_star: float, R_star: float, distance_au: float, T_planet: float):
+    def __init__(self, T_star: float, R_star: float, distance_au: float, 
+                 R_planet: float, T_planet: float, albedo: float = 0.3):
+        """
+        :param T_star: Temperatura efectiva de la estrella [K]
+        :param R_star: Radio de la estrella [m]
+        :param distance_au: Distancia orbital [UA]
+        :param R_planet: Radio del planeta [m]
+        :param T_planet: Temperatura media superficial del planeta [K]
+        :param albedo: Albedo de Bond planetario [0 a 1]
+        """
         self.T_star = T_star
         self.R_star = R_star
-        self.distance_au = distance_au
+        self.distance_m = distance_au * 1.496e11
+        self.R_planet = R_planet
         self.T_planet = T_planet
+        self.albedo = albedo
 
-    def evaluate(self, bonds: Dict[str, ChemicalBond], E_exc_ev: float = 1.8) -> dict:
-        # Rango espectral (100 nm a 2000 nm)
-        lam_grid = np.linspace(100e-9, 2000e-9, 1000)
+        # Geometría del planeta
+        self.A_cross_section = np.pi * (R_planet ** 2)  # Disco captador de radiación [m^2]
+        self.A_surface = 4.0 * np.pi * (R_planet ** 2)   # Esfera planetaria total [m^2]
+
+    def evaluate(self, bonds: Dict[str, ChemicalBond], E_exc_ev: float = 1.8, 
+                 lam_range: Tuple[float, float] = (100e-9, 2000e-9), num_points: int = 1000) -> dict:
+        
+        lam_grid = np.linspace(lam_range[0], lam_range[1], num_points)
         E_grid_ev = photon_energy_ev(lam_grid)
+
+        # 1. Radiación espectral de cuerpo negro
+        b_lam = planck_spectral_radiance(lam_grid, self.T_star)
         
-        # Radiación de cuerpo negro e irradiancia espectral
-        flux_total = calculate_surface_flux(self.T_star, self.R_star, self.distance_au, (100e-9, 2000e-9))
+        # 2. Irradiancia en la superficie estelar y en la órbita (E/A incidente)
+        flux_star_surface = np.pi * np.trapz(b_lam, lam_grid)
+        flux_incidente = flux_star_surface * (self.R_star / self.distance_m)**2
+
+        # 3. Potencia Interceptada y Absorbida considerando R_planeta y Albedo
+        power_intercepted = flux_incidente * self.A_cross_section
+        power_absorbed = power_intercepted * (1.0 - self.albedo)
+        flux_surface_avg = power_absorbed / self.A_surface
+
+        # 4. Ventana fotoquímica ponderada espectralmente por la emisión de la estrella
+        w_t_lam = total_photochemical_window(E_grid_ev, bonds, E_exc_ev=E_exc_ev)
         
-        # Ventana fotoquímica integrada
-        w_t = total_photochemical_window(E_grid_ev, bonds, E_exc_ev=E_exc_ev)
-        photochemical_habitability_index = float(np.trapezoid(w_t, lam_grid) / (lam_grid[-1] - lam_grid[0]))
+        total_spectral_energy = np.trapz(b_lam, lam_grid)
+        useful_spectral_energy = np.trapz(w_t_lam * b_lam, lam_grid)
         
-        # Balance Negentrópico
-        delta_S = negentropy_production_rate(flux_total, self.T_planet, self.T_star)
+        # Índice de compatibilidad fotoquímica normalizado [0, 1]
+        photochemical_index = float(useful_spectral_energy / total_spectral_energy)
+
+        # 5. Tasa global de generación de negentropía disipativa
+        negentropy_rate_global = (4.0 / 3.0) * power_absorbed * ((1.0 / self.T_planet) - (1.0 / self.T_star))
 
         return {
-            "flux_total_W_m2": flux_total,
-            "photochemical_index": photochemical_habitability_index,
-            "negentropy_production_J_K_m2_s": delta_S
+            "flux_incidente_W_m2": flux_incidente,
+            "power_intercepted_GW": power_intercepted / 1e9,
+            "power_absorbed_GW": power_absorbed / 1e9,
+            "flux_surface_avg_W_m2": flux_surface_avg,
+            "photochemical_index": photochemical_index,
+            "negentropy_rate_global_MW_K": negentropy_rate_global / 1e6
         }
 
 
-# Ejemplo de uso
+# -----------------------------------------------------------------------------
+# 5. EJECUCIÓN Y COMPARACIÓN DE ESCENARIOS (TIERRA VS K2-18b)
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Caso 1: Tierra orbitando al Sol
-    sol_tierra = AstrobiologicalHabitabilityModel(
-        T_star=3547.0, 
-        R_star=6.9634e8*0.41, 
-        distance_au=0.159, 
-        T_planet=265.0
+    R_SUN = 6.9634e8
+    R_EARTH = 6.371e6
+
+    # Configuración Sistema Solar - Tierra
+    tierra_model = AstrobiologicalHabitabilityModel(
+        T_star=5778.0,
+        R_star=R_SUN,
+        distance_au=1.0,
+        R_planet=R_EARTH,
+        T_planet=288.0,
+        albedo=0.3
     )
-    
-    res_chonps = sol_tierra.evaluate(BONDS_CHONPS, E_exc_ev=1.8)
-    res_silicon = sol_tierra.evaluate(BONDS_SILICON, E_exc_ev=1.5)
 
-    print("--- RESULTADOS SIMULACIÓN CHONPS ---")
-    print(f"Flujo Total Absorbido: {res_chonps['flux_total_W_m2']:.2f} W/m^2")
-    print(f"Índice de Ventana Fotoquímica W_T: {res_chonps['photochemical_index']:.4f}")
-    print(f"Producción de Negentropía (Delta S): {res_chonps['negentropy_production_J_K_m2_s']:.4f} J/(K*m^2*s)")
+    # Configuración K2-18 - K2-18b
+    k218b_model = AstrobiologicalHabitabilityModel(
+        T_star=3547.0,
+        R_star=R_SUN * 0.41,
+        distance_au=0.159,
+        R_planet=R_EARTH * 2.61,
+        T_planet=265.0,
+        albedo=0.3
+    )
 
-    print("\n--- RESULTADOS SIMULACIÓN SILICIO ---")
-    print(f"Índice de Ventana Fotoquímica W_T (Silicio): {res_silicon['photochemical_index']:.4f}")
+    # Evaluación CHONPS vs Silicio
+    tierra_chonps = tierra_model.evaluate(BONDS_CHONPS, E_exc_ev=1.8)
+    tierra_silicon = tierra_model.evaluate(BONDS_SILICON, E_exc_ev=1.5)
+
+    k218b_chonps = k218b_model.evaluate(BONDS_CHONPS, E_exc_ev=1.8)
+    k218b_silicon = k218b_model.evaluate(BONDS_SILICON, E_exc_ev=1.5)
+
+    print("==================================================")
+    print("               RESULTADOS: TIERRA                 ")
+    print("==================================================")
+    print(f"Flujo Incidente (E/A):               {tierra_chonps['flux_incidente_W_m2']:.2f} W/m^2")
+    print(f"Flujo Promedio Superficie (Abs):      {tierra_chonps['flux_surface_avg_W_m2']:.2f} W/m^2")
+    print(f"Índice W_T Ponderado (CHONPS):        {tierra_chonps['photochemical_index']:.4f}")
+    print(f"Índice W_T Ponderado (Silicio):       {tierra_silicon['photochemical_index']:.4f}")
+    print(f"Generación Negentropía Global:       {tierra_chonps['negentropy_rate_global_MW_K']:,.2f} MW/K\n")
+
+    print("==================================================")
+    print("              RESULTADOS: K2-18b                  ")
+    print("==================================================")
+    print(f"Flujo Incidente (E/A):               {k218b_chonps['flux_incidente_W_m2']:.2f} W/m^2")
+    print(f"Flujo Promedio Superficie (Abs):      {k218b_chonps['flux_surface_avg_W_m2']:.2f} W/m^2")
+    print(f"Índice W_T Ponderado (CHONPS):        {k218b_chonps['photochemical_index']:.4f}")
+    print(f"Índice W_T Ponderado (Silicio):       {k218b_silicon['photochemical_index']:.4f}")
+    print(f"Generación Negentropía Global:       {k218b_chonps['negentropy_rate_global_MW_K']:,.2f} MW/K\n")
